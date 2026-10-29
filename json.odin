@@ -260,27 +260,205 @@ integer_fits_i64 :: proc(text: string) -> bool {
 parse_json_object parses `data` as one strict RFC 8259 JSON value, checked
 first by validate_json, and rejects duplicate keys. On success, `obj` is non-nil only when the
 value is an object; any other value is freed and `is_object` is false.
+
+`core:encoding/json` ignores allocation failures in some paths: it leaks an
+array element and drops it from the result when growing the array fails. So
+the parser only ever allocates from a private Scratch_Arena that records any
+failure, and the result is copied into `allocator` with every allocation
+checked. The arena is freed in one piece, so nothing can leak.
 */
 @(private)
 parse_json_object :: proc(data: []byte, allocator: runtime.Allocator) -> (obj: json.Object, is_object: bool, err: Error) {
 	if !validate_json(data) {
 		return nil, false, Format_Error.Invalid_Json
 	}
-	context.allocator = allocator
-	value, json_err := json.parse(data, .JSON, true, allocator)
+
+	arena := Scratch_Arena{backing = allocator}
+	defer scratch_arena_destroy(&arena)
+	scratch := scratch_arena_allocator(&arena)
+
+	value, json_err := json.parse(data, .JSON, true, scratch)
+	if arena.failed || json_err == .Out_Of_Memory {
+		return nil, false, runtime.Allocator_Error.Out_Of_Memory
+	}
 	if json_err != .None {
-		// Only duplicate keys and allocation failures reach here, and the
-		// object parser frees its own partial results for both.
-		json.destroy_value(value, allocator)
-		if json_err == .Out_Of_Memory {
-			return nil, false, runtime.Allocator_Error.Out_Of_Memory
-		}
+		// Only duplicate keys reach here, because validate_json passed.
 		return nil, false, Format_Error.Invalid_Json
 	}
-	o, ok := value.(json.Object)
+	parsed, ok := value.(json.Object)
 	if !ok {
-		json.destroy_value(value, allocator)
 		return nil, false, nil
 	}
-	return o, true, nil
+	copied := clone_json_value(parsed, allocator) or_return
+	return copied.(json.Object), true, nil
+}
+
+/*
+clone_json_value deep-copies `value` into `allocator`. Unlike json.clone_value,
+it checks every allocation and frees the partial copy when one fails.
+*/
+@(private = "file")
+clone_json_value :: proc(value: json.Value, allocator: runtime.Allocator) -> (out: json.Value, err: runtime.Allocator_Error) {
+	switch v in value {
+	case json.Null, json.Integer, json.Float, json.Boolean:
+		return value, nil
+	case json.String:
+		s := make([]byte, len(v), allocator) or_return
+		copy(s, v)
+		return json.String(s), nil
+	case json.Array:
+		arr := make(json.Array, 0, len(v), allocator) or_return
+		for elem in v {
+			c, cerr := clone_json_value(elem, allocator)
+			if cerr != nil {
+				json.destroy_value(arr, allocator)
+				return nil, cerr
+			}
+			// The capacity is reserved, so this append can't allocate or fail.
+			append(&arr, c)
+		}
+		return arr, nil
+	case json.Object:
+		o := make(json.Object, allocator)
+		if rerr := reserve(&o, len(v)); rerr != nil {
+			delete(o)
+			return nil, rerr
+		}
+		for key, elem in v {
+			k, kerr := make([]byte, len(key), allocator)
+			if kerr != nil {
+				json.destroy_value(o, allocator)
+				return nil, kerr
+			}
+			copy(k, key)
+			c, cerr := clone_json_value(elem, allocator)
+			if cerr != nil {
+				delete(k, allocator)
+				json.destroy_value(o, allocator)
+				return nil, cerr
+			}
+			// The capacity is reserved, so this insert can't allocate.
+			o[string(k)] = c
+		}
+		return o, nil
+	}
+	return nil, nil
+}
+
+/*
+Scratch_Arena is a bump allocator over blocks taken from `backing`. Frees are
+no-ops, scratch_arena_destroy returns every block, and `failed` records
+whether any allocation failed, even one whose error the caller ignored.
+*/
+@(private = "file")
+Scratch_Arena :: struct {
+	backing: runtime.Allocator,
+	head:    ^Scratch_Block,
+	failed:  bool,
+}
+
+// Scratch_Block heads one block; the usable bytes follow it in memory.
+@(private = "file")
+Scratch_Block :: struct {
+	next: ^Scratch_Block,
+	size: int,
+	used: int,
+}
+
+// SCRATCH_MIN_BLOCK and SCRATCH_MAX_BLOCK bound the block sizes; each new block doubles the last one.
+@(private = "file")
+SCRATCH_MIN_BLOCK :: 256
+
+@(private = "file")
+SCRATCH_MAX_BLOCK :: 64 * 1024
+
+@(private = "file")
+scratch_arena_allocator :: proc(a: ^Scratch_Arena) -> runtime.Allocator {
+	return {procedure = scratch_arena_proc, data = a}
+}
+
+@(private = "file")
+scratch_arena_destroy :: proc(a: ^Scratch_Arena) {
+	for b := a.head; b != nil; {
+		next := b.next
+		runtime.mem_free_with_size(b, b.size, a.backing)
+		b = next
+	}
+	a.head = nil
+}
+
+@(private = "file")
+scratch_arena_alloc :: proc(a: ^Scratch_Arena, size, alignment: int) -> ([]byte, runtime.Allocator_Error) {
+	if size < 0 || alignment <= 0 {
+		a.failed = true
+		return nil, .Invalid_Argument
+	}
+	if size == 0 {
+		return nil, nil
+	}
+	header :: size_of(Scratch_Block)
+	if b := a.head; b != nil {
+		base := uintptr(b) + header
+		start := runtime.align_forward_uintptr(base + uintptr(b.used), uintptr(alignment))
+		if int(start - base) + size <= b.size - header {
+			b.used = int(start - base) + size
+			return ([^]byte)(rawptr(start))[:size], nil
+		}
+	}
+	block_size := SCRATCH_MIN_BLOCK
+	if a.head != nil {
+		block_size = min(a.head.size * 2, SCRATCH_MAX_BLOCK)
+	}
+	block_size = max(block_size, header + alignment + size)
+	raw, err := runtime.mem_alloc(block_size, align_of(Scratch_Block), a.backing)
+	if err != nil {
+		a.failed = true
+		return nil, err
+	}
+	b := (^Scratch_Block)(raw_data(raw))
+	b^ = {next = a.head, size = block_size}
+	a.head = b
+	base := uintptr(b) + header
+	start := runtime.align_forward_uintptr(base, uintptr(alignment))
+	b.used = int(start - base) + size
+	return ([^]byte)(rawptr(start))[:size], nil
+}
+
+@(private = "file")
+scratch_arena_proc :: proc(
+	data: rawptr,
+	mode: runtime.Allocator_Mode,
+	size, alignment: int,
+	old_memory: rawptr,
+	old_size: int,
+	loc := #caller_location,
+) -> (
+	[]byte,
+	runtime.Allocator_Error,
+) {
+	a := (^Scratch_Arena)(data)
+	switch mode {
+	case .Alloc, .Alloc_Non_Zeroed:
+		// Blocks come zeroed from mem_alloc and are never reused.
+		return scratch_arena_alloc(a, size, alignment)
+	case .Resize, .Resize_Non_Zeroed:
+		if old_memory != nil && size <= old_size {
+			return ([^]byte)(old_memory)[:size], nil
+		}
+		bytes, err := scratch_arena_alloc(a, size, alignment)
+		if err == nil && old_memory != nil {
+			copy(bytes, ([^]byte)(old_memory)[:old_size])
+		}
+		return bytes, err
+	case .Free:
+		return nil, nil
+	case .Query_Features:
+		set := (^runtime.Allocator_Mode_Set)(old_memory)
+		if set != nil {
+			set^ = {.Alloc, .Alloc_Non_Zeroed, .Free, .Resize, .Resize_Non_Zeroed, .Query_Features}
+		}
+		return nil, nil
+	case .Free_All, .Query_Info:
+	}
+	return nil, .Mode_Not_Implemented
 }

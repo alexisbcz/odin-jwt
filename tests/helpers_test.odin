@@ -106,3 +106,41 @@ decode_payload :: proc(token: string) -> string {
 	raw, _ := jwt.base64url_decode(parts[1])
 	return string(raw)
 }
+
+/*
+Failing_Allocator passes requests to `backing` until `remaining` allocations
+have succeeded, then fails every later allocation or resize with
+`.Out_Of_Memory`. Frees always reach `backing`.
+*/
+Failing_Allocator :: struct {
+	backing:   runtime.Allocator,
+	remaining: int,
+}
+
+// failing_allocator returns an allocator that draws from `f`.
+failing_allocator :: proc(f: ^Failing_Allocator) -> runtime.Allocator {
+	return {procedure = failing_allocator_proc, data = f}
+}
+
+@(private = "file")
+failing_allocator_proc :: proc(
+	data: rawptr,
+	mode: runtime.Allocator_Mode,
+	size, alignment: int,
+	old_memory: rawptr,
+	old_size: int,
+	loc := #caller_location,
+) -> (
+	[]byte,
+	runtime.Allocator_Error,
+) {
+	f := (^Failing_Allocator)(data)
+	#partial switch mode {
+	case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
+		if f.remaining <= 0 {
+			return nil, .Out_Of_Memory
+		}
+		f.remaining -= 1
+	}
+	return f.backing.procedure(f.backing.data, mode, size, alignment, old_memory, old_size, loc)
+}
