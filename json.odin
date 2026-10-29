@@ -14,7 +14,8 @@ optional surrounding whitespace.
 It runs before `core:encoding/json` sees untrusted input, so the parser only
 ever handles well-formed text. It rejects what that parser would let through
 or mishandle: trailing commas, comments, single quotes, unquoted keys, bare
-control characters, invalid escapes, invalid UTF-8, malformed numbers,
+control characters, invalid escapes, unpaired UTF-16 surrogate escapes,
+which the parser would silently replace with U+FFFD, invalid UTF-8, malformed numbers,
 integers outside the i64 range, which the parser would silently wrap, and
 nesting deeper than MAX_JSON_DEPTH. It doesn't allocate.
 */
@@ -161,6 +162,32 @@ is_hex :: proc(c: byte) -> bool {
 	return false
 }
 
+// read_hex4 reads the four hex digits of a `\u` escape and returns the UTF-16 code unit they encode.
+@(private = "file")
+read_hex4 :: proc(v: ^Json_Validator) -> (unit: u16, ok: bool) {
+	if len(v.data) - v.pos < 4 {
+		return 0, false
+	}
+	for i in 0 ..< 4 {
+		c := v.data[v.pos + i]
+		if !is_hex(c) {
+			return 0, false
+		}
+		digit: u16
+		switch c {
+		case '0' ..= '9':
+			digit = u16(c - '0')
+		case 'a' ..= 'f':
+			digit = u16(c - 'a' + 10)
+		case 'A' ..= 'F':
+			digit = u16(c - 'A' + 10)
+		}
+		unit = unit << 4 | digit
+	}
+	v.pos += 4
+	return unit, true
+}
+
 @(private = "file")
 validate_string :: proc(v: ^Json_Validator) -> bool {
 	v.pos += 1 // opening quote
@@ -176,15 +203,21 @@ validate_string :: proc(v: ^Json_Validator) -> bool {
 			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
 				v.pos += 1
 			case 'u':
-				if len(v.data) - v.pos < 5 {
-					return false
-				}
-				for i in 1 ..= 4 {
-					if !is_hex(v.data[v.pos + i]) {
+				v.pos += 1
+				unit := read_hex4(v) or_return
+				switch unit {
+				case 0xd800 ..= 0xdbff:
+					// A high surrogate must be followed by an escaped low surrogate.
+					if !expect_literal(v, `\u`) {
 						return false
 					}
+					low := read_hex4(v) or_return
+					if low < 0xdc00 || low > 0xdfff {
+						return false
+					}
+				case 0xdc00 ..= 0xdfff:
+					return false
 				}
-				v.pos += 5
 			case:
 				return false
 			}

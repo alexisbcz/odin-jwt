@@ -4,6 +4,7 @@ import jwt ".."
 import "base:runtime"
 import "core:encoding/json"
 import "core:mem"
+import "core:strings"
 import "core:testing"
 
 @(private = "file")
@@ -69,3 +70,41 @@ test_encode_survives_allocation_failure_at_every_step :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, succeeded, "encode never succeeded within the allocation budget")
 }
+
+// expect_kid_result signs a token whose header has `kid` set to the raw JSON text `kid_json`.
+@(private = "file")
+expect_kid_result :: proc(t: ^testing.T, kid_json: string, want: jwt.Error, loc := #caller_location) {
+	track: mem.Tracking_Allocator
+	context.allocator = begin_tracking(&track)
+	defer end_tracking(t, &track, loc)
+
+	header := strings.concatenate({`{"alg":"HS256","kid":`, kid_json, `}`})
+	defer delete(header)
+	raw := sign_raw(header, `{"exp":1700000060}`)
+	defer delete(raw)
+	token, err := jwt.decode(raw, secret_key(), {now = NOW})
+	defer jwt.token_destroy(&token)
+	testing.expectf(t, err == want, "kid %s: want %v, got %v", kid_json, want, err, loc = loc)
+}
+
+@(test)
+test_decode_rejects_lone_surrogate_escapes :: proc(t: ^testing.T) {
+	// A lone surrogate has no Unicode value. Accepting it would let two different
+	// headers decode to the same kid, because the parser substitutes U+FFFD.
+	expect_kid_result(t, `"\ud800"`, jwt.Format_Error.Invalid_Json)
+	expect_kid_result(t, `"\uDBFF"`, jwt.Format_Error.Invalid_Json)
+	expect_kid_result(t, `"\udc00"`, jwt.Format_Error.Invalid_Json)
+	expect_kid_result(t, `"\ud800x"`, jwt.Format_Error.Invalid_Json)
+	expect_kid_result(t, `"\ud800A"`, jwt.Format_Error.Invalid_Json)
+	expect_kid_result(t, `"\ud800\ud800"`, jwt.Format_Error.Invalid_Json)
+	expect_kid_result(t, `"\udc00\ud800"`, jwt.Format_Error.Invalid_Json)
+	expect_kid_result(t, `"\ud800\n"`, jwt.Format_Error.Invalid_Json)
+}
+
+@(test)
+test_decode_accepts_surrogate_pairs :: proc(t: ^testing.T) {
+	expect_kid_result(t, `"😀"`, nil)
+	expect_kid_result(t, `"😀 ok"`, nil)
+	expect_kid_result(t, `"￿"`, nil)
+}
+
