@@ -9,7 +9,7 @@
 
 # Odin writes the executable next to where you ran it
 /basic
-/verify
+/eddsa
 /tests.bin
 /jwt
 /odin-jwt
