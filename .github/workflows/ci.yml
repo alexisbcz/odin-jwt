@@ -55,6 +55,16 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Run examples
+        shell: bash
+        run: |
+          shopt -s nullglob
+          for dir in examples/*/; do
+            echo "::group::$dir"
+            odin run "$dir" -out:"${RUNNER_TEMP}/example"
+            echo "::endgroup::"
+          done
+
   docs:
     name: Vale
     runs-on: ubuntu-latest
