@@ -108,3 +108,34 @@ test_decode_accepts_surrogate_pairs :: proc(t: ^testing.T) {
 	expect_kid_result(t, `"￿"`, nil)
 }
 
+@(test)
+test_decode_rejects_empty_member_names :: proc(t: ^testing.T) {
+	// core:encoding/json drops members named "", so `{"":1,"":2}` would pass the
+	// duplicate check and the member would vanish from the payload.
+	track: mem.Tracking_Allocator
+	context.allocator = begin_tracking(&track)
+	defer end_tracking(t, &track)
+
+	payloads := []string{`{"":1,"exp":1700000060}`, `{"":1,"":2,"exp":1700000060}`, `{"exp":1700000060,"o":{ "" :true}}`}
+	for payload in payloads {
+		raw := sign_raw(`{"alg":"HS256"}`, payload)
+		defer delete(raw)
+		token, err := jwt.decode(raw, secret_key(), {now = NOW})
+		jwt.token_destroy(&token)
+		testing.expectf(t, err == jwt.Format_Error.Invalid_Json, "%s: want Invalid_Json, got %v", payload, err)
+	}
+	raw := sign_raw(`{"alg":"HS256","":"x"}`, `{"exp":1700000060}`)
+	defer delete(raw)
+	token, err := jwt.decode(raw, secret_key(), {now = NOW})
+	jwt.token_destroy(&token)
+	testing.expect_value(t, err, jwt.Format_Error.Invalid_Json)
+
+	// A member whose name is an escape is not empty and stays accepted.
+	ok_raw := sign_raw(`{"alg":"HS256"}`, `{" ":1,"exp":1700000060}`)
+	defer delete(ok_raw)
+	ok_token, ok_err := jwt.decode(ok_raw, secret_key(), {now = NOW})
+	defer jwt.token_destroy(&ok_token)
+	testing.expect_value(t, ok_err, nil)
+	_, has_space := jwt.claim(&ok_token, " ")
+	testing.expect(t, has_space)
+}

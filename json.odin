@@ -15,7 +15,8 @@ It runs before `core:encoding/json` sees untrusted input, so the parser only
 ever handles well-formed text. It rejects what that parser would let through
 or mishandle: trailing commas, comments, single quotes, unquoted keys, bare
 control characters, invalid escapes, unpaired UTF-16 surrogate escapes,
-which the parser would silently replace with U+FFFD, invalid UTF-8, malformed numbers,
+which the parser would silently replace with U+FFFD, empty member names,
+which the parser would silently drop, invalid UTF-8, malformed numbers,
 integers outside the i64 range, which the parser would silently wrap, and
 nesting deeper than MAX_JSON_DEPTH. It doesn't allocate.
 */
@@ -99,7 +100,13 @@ validate_object :: proc(v: ^Json_Validator, depth: int) -> bool {
 	}
 	for {
 		skip_ws(v)
+		key_start := v.pos
 		if peek(v) != '"' || !validate_string(v) {
+			return false
+		}
+		// core:encoding/json silently drops members with an empty key, which
+		// would also hide duplicates of it, so reject them outright.
+		if v.pos - key_start == 2 {
 			return false
 		}
 		skip_ws(v)
