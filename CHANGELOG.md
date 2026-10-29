@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-29
+
+### Fixed
+
+- `decode` and `encode` no longer leak memory when the allocator fails partway through. `core:encoding/json` ignores some allocation errors, which also let an array lose an element without an error. JSON is now parsed into a private scratch arena and copied into your allocator with every allocation checked.
+- Decoding rejects `\u` escapes of unpaired UTF-16 surrogates. Before, the parser changed them to U+FFFD, so two different headers could give the same `kid`.
+- Decoding and `encode` reject JSON members with an empty name. Before, the parser dropped them, so `{"":1,"":2}` got past the check for duplicate members.
+
 ## [0.1.0] - 2026-10-29
 
 ### Added
@@ -26,5 +34,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - HMAC verification compares tags in constant time and refuses keys shorter than the hash output.
 - Strict input checks: canonical base64url, strict JSON without duplicate members, `i64` integers, limited nesting, a 64 KiB default size limit and no `crit` headers.
 
-[Unreleased]: https://github.com/alexisbcz/odin-jwt/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/alexisbcz/odin-jwt/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/alexisbcz/odin-jwt/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/alexisbcz/odin-jwt/releases/tag/v0.1.0

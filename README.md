@@ -157,6 +157,8 @@ odin run examples/eddsa
 - The key type picks the algorithm family. An HMAC secret never verifies an EdDSA token and the reverse, which rules out algorithm confusion attacks.
 - HMAC verification compares tags in constant time. `decode` checks the signature before it parses the payload, so unauthenticated payloads never reach the JSON parser.
 - Headers and payloads must be strict RFC 8259 JSON with no duplicate members, integers within the `i64` range and at most `MAX_JSON_DEPTH` levels of nesting. Base64url must be canonical.
+- Decoding also rejects member names that are empty and `\u` escapes of unpaired UTF-16 surrogates. `core:encoding/json` would drop the first and change the second to U+FFFD.
+- If the allocator fails at any step, `decode` and `encode` return `Out_Of_Memory` and free everything. They never return a partial result.
 - Decoding rejects headers with `crit`, because the package implements no JWS extensions.
 - Decoding rounds fractional NumericDate values down to whole seconds.
 - Every allocating procedure takes `allocator := context.allocator` and says who owns the result. A failed `decode` returns a zero `Token` that owns nothing.
