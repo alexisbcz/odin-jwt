@@ -1,3 +1,4 @@
+(?:jwt|JWTs?)
 Ada_Case
 alexisbcz
 alg
@@ -33,8 +34,6 @@ jti
 JWA
 JWK
 JWS
-jwt
-JWT(s)?
 kid
 kqueue
 laytan
@@ -103,4 +102,5 @@ XCTest
 [Tt]oolchain(s)?
 [Uu]nion(s)?
 [Uu]nmarshal(ing)?
+[Uu]npadded
 [Vv]endor(ed|ing)?
